@@ -776,9 +776,18 @@ class CanvasTileLayerRenderer extends CanvasLayerRenderer {
     const zs = Object.keys(tilesByZ).map(Number);
     zs.sort(ascending);
 
+    // For fully opaque, non-reused layers, use clearRect instead of canvas
+    // clip paths: render low-z tiles first, then high-z tiles clear and
+    // overdraw their area.  This avoids expensive context.clip() calls on
+    // devices with slow GPU clip-path support.
+    const useClipPaths = layerState.opacity !== 1 || this.containerReused;
+    if (!useClipPaths) {
+      zs.reverse();
+    }
+
     let currentClip;
-    const clips = [];
-    const clipZs = [];
+    const clips = useClipPaths ? /** @type {Array<Array<number>>} */ ([]) : null;
+    const clipZs = useClipPaths ? /** @type {Array<number>} */ ([]) : null;
     for (let i = zs.length - 1; i >= 0; --i) {
       const currentZ = zs[i];
       const currentTilePixelSize = tileSource.getTilePixelSize(
@@ -822,38 +831,42 @@ class CanvasTileLayerRenderer extends CanvasLayerRenderer {
 
         let contextSaved = false;
 
-        // Clip mask for regions in this tile that already filled by a higher z tile
-        currentClip = [x, y, x + w, y, x + w, y + h, x, y + h];
-        for (let i = 0, ii = clips.length; i < ii; ++i) {
-          if (!transition && currentZ < clipZs[i]) {
-            const clip = clips[i];
-            if (
-              intersects(
-                [x, y, x + w, y + h],
-                [clip[0], clip[3], clip[4], clip[7]],
-              )
-            ) {
-              if (!contextSaved) {
-                context.save();
-                contextSaved = true;
+        if (clips) {
+          // Clip mask for regions in this tile that already filled by a higher z tile
+          currentClip = [x, y, x + w, y, x + w, y + h, x, y + h];
+          for (let i = 0, ii = clips.length; i < ii; ++i) {
+            if (!transition && currentZ < clipZs[i]) {
+              const clip = clips[i];
+              if (
+                intersects(
+                  [x, y, x + w, y + h],
+                  [clip[0], clip[3], clip[4], clip[7]],
+                )
+              ) {
+                if (!contextSaved) {
+                  context.save();
+                  contextSaved = true;
+                }
+                context.beginPath();
+                // counter-clockwise (outer ring) for current tile
+                context.moveTo(currentClip[0], currentClip[1]);
+                context.lineTo(currentClip[2], currentClip[3]);
+                context.lineTo(currentClip[4], currentClip[5]);
+                context.lineTo(currentClip[6], currentClip[7]);
+                // clockwise (inner ring) for higher z tile
+                context.moveTo(clip[6], clip[7]);
+                context.lineTo(clip[4], clip[5]);
+                context.lineTo(clip[2], clip[3]);
+                context.lineTo(clip[0], clip[1]);
+                context.clip();
               }
-              context.beginPath();
-              // counter-clockwise (outer ring) for current tile
-              context.moveTo(currentClip[0], currentClip[1]);
-              context.lineTo(currentClip[2], currentClip[3]);
-              context.lineTo(currentClip[4], currentClip[5]);
-              context.lineTo(currentClip[6], currentClip[7]);
-              // clockwise (inner ring) for higher z tile
-              context.moveTo(clip[6], clip[7]);
-              context.lineTo(clip[4], clip[5]);
-              context.lineTo(clip[2], clip[3]);
-              context.lineTo(clip[0], clip[1]);
-              context.clip();
             }
           }
+          clips.push(currentClip);
+          clipZs.push(currentZ);
+        } else {
+          context.clearRect(x, y, w, h);
         }
-        clips.push(currentClip);
-        clipZs.push(currentZ);
 
         this.drawTile(tile, frameState, x, y, w, h, tileGutter, transition);
         if (contextSaved) {
